@@ -23,6 +23,7 @@ const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOUSELEAVE: u32 = 0x02A2;
 const WM_NCCALCSIZE: u32 = 0x0083;
 const WM_NCHITTEST: u32 = 0x0084;
+const WM_SETCURSOR: u32 = 0x0020;
 const WM_ACTIVATE: u32 = 0x0006;
 const WM_KILLFOCUS: u32 = 0x0008;
 const WM_ACTIVATEAPP: u32 = 0x001C;
@@ -194,6 +195,7 @@ var g_font_title: usize = 0;
 var g_font_status: usize = 0;
 var g_font_btn: usize = 0;
 var g_cursor_hand: usize = 0;
+var g_cursor_arrow: usize = 0;
 var g_hover: u8 = 0; // 0 无 / 1..3 开关 / 4 主按钮
 var g_tracked: bool = false;
 var g_auto_on: bool = false;
@@ -398,6 +400,16 @@ fn sc(v: i32) i32 {
 
 fn inRect(r: RECT, x: i32, y: i32) bool {
     return x >= r.left and x < r.right and y >= r.top and y < r.bottom;
+}
+
+// 光标句柄懒加载 + 缓存：系统光标句柄是共享的，没必要每次移动都去 LoadCursorW 一遍
+fn cursorFor(is_hand: bool) usize {
+    if (is_hand) {
+        if (g_cursor_hand == 0) g_cursor_hand = LoadCursorW(0, IDC_HAND);
+        return g_cursor_hand;
+    }
+    if (g_cursor_arrow == 0) g_cursor_arrow = LoadCursorW(0, IDC_ARROW);
+    return g_cursor_arrow;
 }
 
 // ================= 核心功能：关闭显示器 =================
@@ -831,6 +843,18 @@ fn menuWndProc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             menuPaint(hwnd);
             return 0;
         },
+        // 同主窗口：光标统一由 WM_SETCURSOR 决定，WM_MOUSEMOVE 里只在悬停项变化时补一次
+        // （菜单一直抓着鼠标捕获，捕获期间系统可能不发 WM_SETCURSOR）
+        WM_SETCURSOR => {
+            if ((lp & 0xFFFF) == HTCLIENT) {
+                var pt: POINT = undefined;
+                const ok = GetCursorPos(&pt) != 0;
+                if (ok) _ = ScreenToClient(hwnd, &pt);
+                _ = SetCursor(cursorFor(ok and menuHoverIndex(pt.x, pt.y) != 0));
+                return 1;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        },
         WM_MOUSEMOVE => {
             const x: i32 = @as(i16, @truncate(lp & 0xFFFF));
             const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
@@ -838,8 +862,8 @@ fn menuWndProc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             if (hv != g_menu_hover) {
                 g_menu_hover = hv;
                 _ = InvalidateRect(hwnd, null, 0);
+                _ = SetCursor(cursorFor(hv != 0)); // 只在悬停项变化时设一次
             }
-            _ = SetCursor(if (hv != 0) g_cursor_hand else LoadCursorW(0, IDC_ARROW));
             if (!g_menu_tracked) {
                 g_menu_tracked = true;
                 var tme = TRACKMOUSEEVENT{ .cbSize = @sizeOf(TRACKMOUSEEVENT), .dwFlags = TME_LEAVE, .hwndTrack = hwnd, .dwHoverTime = 0 };
@@ -1577,6 +1601,21 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             paint(hwnd);
             return 0;
         },
+        // 光标只在这里设置。每次鼠标移动前系统都会先发 WM_SETCURSOR，DefWindowProc 收到后
+        // 会把窗口类里的箭头光标重新设一遍；如果同时又在 WM_MOUSEMOVE 里 SetCursor(手型)，
+        // 两条路径每移动一像素就互相覆盖一次 —— Win11 的光标由 DWM 合成、同帧内合并，
+        // 看不出差别；Win10 上就是"箭头和小手来回闪 + 指针发涩变慢"（每次切换都要重画光标，
+        // 积压的鼠标消息只能跳着处理）。这里统一接管并返回 TRUE，让系统不要再走默认处理。
+        WM_SETCURSOR => {
+            if ((lp & 0xFFFF) == HTCLIENT) {
+                var pt: POINT = undefined;
+                const ok = GetCursorPos(&pt) != 0;
+                if (ok) _ = ScreenToClient(hwnd, &pt);
+                _ = SetCursor(cursorFor(ok and hitTest(pt.x, pt.y) != 0));
+                return 1; // TRUE：光标已由本窗口设好
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp); // 标题栏拖动区等非客户区交回系统
+        },
         WM_MOUSEMOVE => {
             const x: i32 = @as(i16, @truncate(lp & 0xFFFF));
             const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
@@ -1591,7 +1630,8 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
                 }
                 g_hover = h;
             }
-            _ = SetCursor(if (h != 0) g_cursor_hand else LoadCursorW(0, IDC_ARROW));
+            // 光标不在这里设（见 WM_SETCURSOR）：这个窗口从不抓鼠标捕获，
+            // 所以不需要在移动过程里再补 SetCursor，省掉一次每次移动都要做的系统调用。
             if (h != 0 and !g_tracked) {
                 g_tracked = true;
                 var tme = TRACKMOUSEEVENT{ .cbSize = @sizeOf(TRACKMOUSEEVENT), .dwFlags = TME_LEAVE, .hwndTrack = hwnd, .dwHoverTime = 0 };
