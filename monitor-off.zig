@@ -1,6 +1,6 @@
 // monitor-off.zig —— 显示器关闭助手
 // 功能：Win+Alt+L 关闭显示器；托盘常驻；设置窗口（快捷键/开机自启/托盘常驻 三开关）
-// 编译: zig build-exe monitor-off.zig icon.res -O ReleaseSmall --subsystem windows -lgdi32 -lshell32 -ladvapi32 -ldwmapi
+// 编译: zig build-exe monitor-off.zig icon/icon.res -O ReleaseSmall --subsystem windows -lgdi32 -lshell32 -ladvapi32 -ldwmapi
 const std = @import("std");
 
 // ================= Win32 常量 =================

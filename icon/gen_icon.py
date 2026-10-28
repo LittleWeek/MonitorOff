@@ -2,8 +2,10 @@
 # 原 SVG (viewBox 0 0 1024 1024, fill #707070) 的几何结构：
 #   1) 显示器外框: 圆角矩形环 外沿(154.45,187.73)-(927.40,708.27) r=102.4, 线宽 68.27
 #   2) 底座横线:   圆头胶囊 (323.42,750.93)-(758.61,819.20) r=34.13
+from pathlib import Path
 from PIL import Image, ImageDraw
 
+HERE = Path(__file__).resolve().parent  # 产物固定写在脚本旁边，从哪个目录跑都一样
 COLOR = (112, 112, 112, 255)  # #707070
 
 SS = 4  # 4x 超采样抗锯齿
@@ -21,7 +23,7 @@ d.rounded_rectangle([323.42*s, 750.93*s, 758.61*s, 819.20*s],
 
 img = img.resize((1024, 1024), Image.LANCZOS)
 
-img.save("icon.ico",
+img.save(HERE / "icon.ico",
          sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (24, 24), (16, 16)])
-img.resize((128, 128), Image.LANCZOS).save("icon_preview.png")
+img.resize((128, 128), Image.LANCZOS).save(HERE / "icon_preview.png")
 print("icon.ico generated")
