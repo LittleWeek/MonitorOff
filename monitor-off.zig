@@ -24,6 +24,17 @@ const WM_MOUSELEAVE: u32 = 0x02A2;
 const WM_NCCALCSIZE: u32 = 0x0083;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_ACTIVATE: u32 = 0x0006;
+const WM_KILLFOCUS: u32 = 0x0008;
+const WM_ACTIVATEAPP: u32 = 0x001C;
+const WM_CANCELMODE: u32 = 0x001F;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONDBLCLK: u32 = 0x0206;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_XBUTTONDOWN: u32 = 0x020B;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_CAPTURECHANGED: u32 = 0x0215;
 const WM_SYSKEYUP: u32 = 0x0105;
 
 const HTCLIENT: isize = 1;
@@ -68,6 +79,8 @@ const IDC_HAND: usize = 32649;
 const ICON_RES_ID: usize = 1;
 
 const TME_LEAVE: u32 = 0x0002;
+const WH_KEYBOARD_LL: i32 = 13; // 低级键盘钩子（只在菜单展开期间挂）
+const WH_MOUSE_LL: i32 = 14; // 低级鼠标钩子（同上）
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOZORDER: u32 = 0x0004;
@@ -133,6 +146,7 @@ const ID_HOTKEY: i32 = 1;
 const TRAY_CB_MSG: u32 = WM_APP + 1;
 const WM_SHOW_SETTINGS: u32 = WM_USER + 1;
 const WM_MENU_CMD: u32 = WM_USER + 2;
+const WM_MENU_HIDE: u32 = WM_USER + 3; // 低级输入钩子发现"该收起了"，投递给菜单窗口自己处理
 
 const MENU_OFF: i32 = 200;
 const MENU_SETTINGS: i32 = 201;
@@ -160,6 +174,11 @@ var g_menu_hwnd: usize = 0; // 自绘菜单窗口（按需创建，一直复用�
 var g_menu_font: usize = 0;
 var g_menu_hover: usize = 0; // 0 无 / 1..5 对应 MENU_DEFS 下标 + 1
 var g_menu_tracked: bool = false;
+var g_menu_captured: bool = false; // 菜单当前抓着鼠标捕获
+var g_menu_hiding: bool = false; // 正在收起（防止 WM_KILLFOCUS 等消息重入递归）
+var g_menu_open: bool = false; // 菜单是否展开（钩子里用，避免高频调 API）
+var g_hook_mouse: usize = 0; // WH_MOUSE_LL（只在菜单展开期间挂着）
+var g_hook_key: usize = 0; // WH_KEYBOARD_LL（同上）
 var g_menu_prev_fg: usize = 0; // 弹菜单前的前台窗口，关闭后还给它
 var g_mm_mem: usize = 0;
 var g_mm_bm: usize = 0;
@@ -323,6 +342,13 @@ extern "user32" fn SetWindowRgn(hwnd: usize, hRgn: usize, bRedraw: i32) i32;
 extern "user32" fn IsWindowVisible(hwnd: usize) i32;
 extern "user32" fn SetTimer(hwnd: usize, id: usize, elapse: u32, proc: ?*const anyopaque) usize;
 extern "user32" fn GetKeyState(vk: i32) i16;
+extern "user32" fn SetCapture(hwnd: usize) usize;
+extern "user32" fn GetCapture() usize;
+extern "user32" fn ReleaseCapture() i32;
+extern "user32" fn SetWindowsHookExW(idHook: i32, lpfn: *const anyopaque, hmod: usize, dwThreadId: u32) usize;
+extern "user32" fn UnhookWindowsHookEx(hhk: usize) i32;
+extern "user32" fn CallNextHookEx(hhk: usize, nCode: i32, wp: usize, lp: isize) isize;
+extern "user32" fn GetWindowRect(hwnd: usize, *RECT) i32;
 
 extern "shell32" fn Shell_NotifyIconW(dwMessage: u32, lpData: *NOTIFYICONDATAW) i32;
 
@@ -711,15 +737,86 @@ fn menuPaint(hwnd: usize) void {
     _ = BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, g_mm_mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
 }
 
+// 收起菜单。不能只靠"窗口失去激活"：抢前台被系统拒绝时（前台锁、别的程序占着激活权），
+// 或者点在桌面壁纸这类不改变激活窗口的地方，菜单永远收不到 WM_ACTIVATE(WA_INACTIVE)，
+// 就会一直挂在屏幕上。这里做两层兜底：菜单开着时自己抓鼠标捕获 + 挂低级输入钩子。
 fn hideTrayMenu() void {
-    if (g_menu_hwnd == 0) return;
-    if (IsWindowVisible(g_menu_hwnd) == 0) return;
+    if (g_menu_hwnd == 0 or g_menu_hiding) return;
+    const was_visible = IsWindowVisible(g_menu_hwnd) != 0;
+    g_menu_hiding = true;
+    defer g_menu_hiding = false;
+
+    // 钩子和标志无条件清掉：哪怕菜单已经被别的路径藏起来了，也不留下全局钩子
+    g_menu_open = false;
+    removeMenuHooks();
+    if (!was_visible) return;
+    if (g_menu_captured) {
+        g_menu_captured = false; // 先清标志，避免 ReleaseCapture 触发的 WM_CAPTURECHANGED 重入
+        if (GetCapture() == g_menu_hwnd) _ = ReleaseCapture();
+    }
     _ = ShowWindow(g_menu_hwnd, SW_HIDE);
     freeMenuBuffers(); // 菜单不常开，缓冲用完就还回去
     // 前台还给原来的窗口（比如刚才正在用的浏览器）
     if (g_menu_prev_fg != 0 and GetForegroundWindow() == g_menu_hwnd) {
         _ = SetForegroundWindow(g_menu_prev_fg);
     }
+}
+
+// ================= 兜底：菜单展开期间的低级输入钩子 =================
+// 光靠"激活 + 鼠标捕获"仍然有漏网场景：抢前台被拒时菜单根本不激活；点在桌面壁纸这类
+// 不抢激活的地方时，Window 消息也可能压根不往菜单送。低级钩子能看到全局输入，
+// 菜单外的按下/按键一律投递 WM_MENU_HIDE 让它自己收起。
+const MSLLHOOKSTRUCT = extern struct {
+    pt: POINT,
+    mouseData: u32,
+    flags: u32,
+    time: u32,
+    dwExtraInfo: usize,
+};
+
+fn isMenuVisibleNow() bool {
+    return g_menu_open and g_menu_hwnd != 0;
+}
+
+fn pointOutsideMenu(pt: POINT) bool {
+    var wr: RECT = undefined;
+    if (GetWindowRect(g_menu_hwnd, &wr) == 0) return true;
+    return pt.x < wr.left or pt.x >= wr.right or pt.y < wr.top or pt.y >= wr.bottom;
+}
+
+fn mouseHookProc(nCode: i32, wp: usize, lp: isize) callconv(.c) isize {
+    if (nCode >= 0 and isMenuVisibleNow()) {
+        const msg: u32 = @intCast(wp);
+        if (msg == WM_LBUTTONDOWN or msg == WM_RBUTTONDOWN or msg == WM_MBUTTONDOWN or msg == WM_XBUTTONDOWN or
+            msg == WM_LBUTTONDBLCLK or msg == WM_RBUTTONDBLCLK or msg == WM_MOUSEWHEEL)
+        {
+            const info: *const MSLLHOOKSTRUCT = @ptrFromInt(@as(usize, @bitCast(lp)));
+            if (pointOutsideMenu(info.pt)) _ = PostMessageW(g_menu_hwnd, WM_MENU_HIDE, 0, 0);
+        }
+    }
+    return CallNextHookEx(0, nCode, wp, lp);
+}
+
+fn keyHookProc(nCode: i32, wp: usize, lp: isize) callconv(.c) isize {
+    if (nCode >= 0 and isMenuVisibleNow()) {
+        const msg: u32 = @intCast(wp);
+        if (msg == WM_KEYDOWN or msg == WM_SYSKEYDOWN) {
+            // 菜单自己拿到键盘时按键交给菜单处理（↑↓/Enter/Esc）；键盘在别的程序手里就直接收起
+            if (GetForegroundWindow() != g_menu_hwnd) _ = PostMessageW(g_menu_hwnd, WM_MENU_HIDE, 0, 0);
+        }
+    }
+    return CallNextHookEx(0, nCode, wp, lp);
+}
+
+fn installMenuHooks() void {
+    g_menu_open = true;
+    if (g_hook_mouse == 0) g_hook_mouse = SetWindowsHookExW(WH_MOUSE_LL, @ptrCast(&mouseHookProc), GetModuleHandleW(null), 0);
+    if (g_hook_key == 0) g_hook_key = SetWindowsHookExW(WH_KEYBOARD_LL, @ptrCast(&keyHookProc), GetModuleHandleW(null), 0);
+}
+
+fn removeMenuHooks() void {
+    if (g_hook_mouse != 0) { _ = UnhookWindowsHookEx(g_hook_mouse); g_hook_mouse = 0; }
+    if (g_hook_key != 0) { _ = UnhookWindowsHookEx(g_hook_key); g_hook_key = 0; }
 }
 
 fn menuWndProc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
@@ -796,12 +893,44 @@ fn menuWndProc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
                 else => {},
             }
         },
+        // 菜单外的按下：无论菜单有没有抢到激活都会先送到这里（靠鼠标捕获），收起并吃掉这一下点击
+        WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONDBLCLK, WM_MBUTTONDOWN, WM_XBUTTONDOWN => {
+            const x: i32 = @as(i16, @truncate(lp & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
+            var rc: RECT = undefined;
+            _ = GetClientRect(hwnd, &rc);
+            if (!inRect(rc, x, y)) hideTrayMenu();
+            return 0;
+        },
+        // 捕获被别的窗口抢走（比如点到了任务栏、或系统弹窗抢输入）：菜单已经收不到外面的点击了，直接收起
+        WM_CAPTURECHANGED => {
+            if (g_menu_captured) hideTrayMenu();
+            return 0;
+        },
+        WM_MENU_HIDE => {
+            hideTrayMenu(); // 低级输入钩子判定"该收起了"
+            return 0;
+        },
+        WM_KILLFOCUS, WM_CANCELMODE => {
+            hideTrayMenu(); // 键盘焦点/输入模态被抢走
+            return 0;
+        },
         WM_ACTIVATE => {
             if ((wp & 0xFFFF) == 0) hideTrayMenu(); // WA_INACTIVE：点到菜单外面了
             return 0;
         },
+        WM_ACTIVATEAPP => {
+            if (wp == 0) hideTrayMenu(); // 整个程序失去激活（切到了别的应用）
+            return 0;
+        },
         WM_DESTROY => {
             freeMenuBuffers();
+            g_menu_open = false;
+            removeMenuHooks();
+            if (g_menu_captured) {
+                g_menu_captured = false;
+                if (GetCapture() == hwnd) _ = ReleaseCapture();
+            }
             if (g_menu_font != 0) { _ = DeleteObject(g_menu_font); g_menu_font = 0; }
             g_menu_hwnd = 0;
             return 0;
@@ -869,6 +998,11 @@ fn showTrayMenu() void {
     if (rgn != 0) _ = SetWindowRgn(m, rgn, 1);
     forceForeground(m);
     _ = SetFocus(m);
+    // 抓鼠标捕获：菜单开着时，屏幕任何位置的点击都先送到菜单窗口。
+    // 这样即便抢前台被系统拒绝（菜单没被激活、收不到 WM_ACTIVATE），点外面也一定能收起。
+    _ = SetCapture(m);
+    g_menu_captured = GetCapture() == m;
+    installMenuHooks(); // 兜底：激活/捕获都失效时，靠低级钩子把"点外面/按键"变成收起
     _ = InvalidateRect(m, null, 1);
 }
 
