@@ -1,0 +1,14 @@
+# 构建产物
+*.exe
+*.res
+*.obj
+*.pdb
+.zig-cache/
+zig-out/
+
+# 临时脚本与截图
+shot.py
+tclick.py
+zoom.png
+ui_check.png
+probe.log
