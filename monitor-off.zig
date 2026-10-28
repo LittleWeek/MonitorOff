@@ -21,11 +21,28 @@ const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MOUSELEAVE: u32 = 0x02A2;
+const WM_NCCALCSIZE: u32 = 0x0083;
+const WM_NCHITTEST: u32 = 0x0084;
+const WM_ACTIVATE: u32 = 0x0006;
+const WM_SYSKEYUP: u32 = 0x0105;
+
+const HTCLIENT: isize = 1;
+const HTCAPTION: isize = 2;
+
+const CS_DROPSHADOW: u32 = 0x00020000;
+const WS_EX_TOPMOST: usize = 0x00000008;
+const HWND_TOPMOST: usize = ~@as(usize, 0);
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
 const WND_STYLE: usize = 0x00CA0000; // CAPTION | SYSMENU | MINIMIZEBOX
+const WS_POPUP: usize = 0x80000000;
+const WS_EX_TOOLWINDOW: usize = 0x00000080;
 
 const SW_HIDE: i32 = 0;
+const SW_SHOWNOACTIVATE: i32 = 4;
 const SW_SHOW: i32 = 5;
+const SW_MINIMIZE: i32 = 6;
+const SW_RESTORE: i32 = 9;
 
 const MOD_ALT: u32 = 0x0001;
 const MOD_WIN: u32 = 0x0008;
@@ -43,13 +60,6 @@ const NIM_DELETE: u32 = 0x0002;
 const NIF_MESSAGE: u32 = 0x0001;
 const NIF_ICON: u32 = 0x0002;
 const NIF_TIP: u32 = 0x0004;
-
-const MF_STRING: u32 = 0x0000;
-const MF_SEPARATOR: u32 = 0x0800;
-const TPM_RIGHTBUTTON: u32 = 0x0002;
-const TPM_BOTTOMALIGN: u32 = 0x0020;
-const TPM_NONOTIFY: u32 = 0x0080;
-const TPM_RETURNCMD: u32 = 0x0100;
 
 const MB_ICONWARNING: u32 = 0x30;
 
@@ -97,9 +107,13 @@ const C_PILL_DIV: u32 = 0x00C1C6CD; // #CDC6C1 → 分隔线（比边框深一�
 const C_PILL_TX: u32 = 0x00514137; // #374151
 const C_PILL_ON: u32 = 0x00EEF5E1; // #E1F5EE 录制态底色
 const C_ACC_TX: u32 = 0x00566E0F; // #0F6E56 录制态文字
+const C_MENU_HOV: u32 = 0x00F6F4F3; // #F3F4F6 菜单项悬停底色
+const C_CLOSE_HOV: u32 = 0x00E3E3FA; // #FAE3E3 关闭按钮悬停底色
+const C_BTN_HOV: u32 = 0x00F1EEED; // #EDEEF1 最小化按钮悬停底色
 
 // ================= 字符串常量（UTF-16） =================
 const CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("MonitorOffWnd");
+const MENU_CLASS = std.unicode.utf8ToUtf16LeStringLiteral("MonitorOffMenu");
 const WND_TITLE = std.unicode.utf8ToUtf16LeStringLiteral("显示器关闭助手");
 const TIP_TEXT = std.unicode.utf8ToUtf16LeStringLiteral("显示器关闭助手 (Win+Alt+L)");
 const MUTEX_NAME = std.unicode.utf8ToUtf16LeStringLiteral("Local\\MonitorOffSingleInstance");
@@ -118,13 +132,41 @@ const HK_VK_VALUE = std.unicode.utf8ToUtf16LeStringLiteral("HotkeyVK");
 const ID_HOTKEY: i32 = 1;
 const TRAY_CB_MSG: u32 = WM_APP + 1;
 const WM_SHOW_SETTINGS: u32 = WM_USER + 1;
+const WM_MENU_CMD: u32 = WM_USER + 2;
 
 const MENU_OFF: i32 = 200;
 const MENU_SETTINGS: i32 = 201;
 const MENU_QUIT: i32 = 202;
 
+// ================= 自绘菜单 / 自绘标题栏的尺寸（逻辑像素，走 sc() 缩放） =================
+const CHROME_H: i32 = 40; // 标题栏高度（内容整体下移这么多）
+const MENU_W: i32 = 152; // 菜单宽度
+const MENU_ITEM_H: i32 = 32; // 菜单项高度
+const MENU_SEP_H: i32 = 9; // 分隔条高度
+const MENU_PAD: i32 = 6; // 菜单上下内边距
+
+const MenuDef = struct { text: [*:0]const u16, cmd: i32, sep: bool };
+const MENU_DEFS = [_]MenuDef{
+    .{ .text = std.unicode.utf8ToUtf16LeStringLiteral("关闭显示器"), .cmd = MENU_OFF, .sep = false },
+    .{ .text = std.unicode.utf8ToUtf16LeStringLiteral(""), .cmd = 0, .sep = true },
+    .{ .text = std.unicode.utf8ToUtf16LeStringLiteral("设置…"), .cmd = MENU_SETTINGS, .sep = false },
+    .{ .text = std.unicode.utf8ToUtf16LeStringLiteral(""), .cmd = 0, .sep = true },
+    .{ .text = std.unicode.utf8ToUtf16LeStringLiteral("退出"), .cmd = MENU_QUIT, .sep = false },
+};
+
 // ================= 全局状态 =================
 var g_hwnd: usize = 0;
+var g_menu_hwnd: usize = 0; // 自绘菜单窗口（按需创建，一直复用）
+var g_menu_font: usize = 0;
+var g_menu_hover: usize = 0; // 0 无 / 1..5 对应 MENU_DEFS 下标 + 1
+var g_menu_tracked: bool = false;
+var g_menu_prev_fg: usize = 0; // 弹菜单前的前台窗口，关闭后还给它
+var g_mm_mem: usize = 0;
+var g_mm_bm: usize = 0;
+var g_mm_mem4: usize = 0;
+var g_mm_bm4: usize = 0;
+var g_mm_w: i32 = 0;
+var g_mm_h: i32 = 0;
 var g_dpi: i32 = 96;
 var g_cw: i32 = 360;
 var g_ch: i32 = 252;
@@ -146,6 +188,8 @@ var g_hotkey_text: [64]u16 = undefined;
 
 var rc_sw: [4]RECT = undefined;
 var rc_off: RECT = undefined;
+var rc_btn_min: RECT = undefined; // 自绘标题栏：最小化
+var rc_btn_close: RECT = undefined; // 自绘标题栏：关闭
 
 // ---- 绘制缓存（全局复用，避免每次重绘分配/释放大块位图） ----
 var g_mem: usize = 0; // 1x 成品缓存 DC
@@ -180,6 +224,12 @@ const TRACKMOUSEEVENT = extern struct {
     dwFlags: u32,
     hwndTrack: usize,
     dwHoverTime: u32,
+};
+const MONITORINFO = extern struct {
+    cbSize: u32,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: u32,
 };
 const WNDCLASSEXW = extern struct {
     cbSize: u32,
@@ -222,6 +272,7 @@ extern "kernel32" fn GetLastError() u32;
 extern "kernel32" fn Sleep(ms: u32) void;
 extern "kernel32" fn MulDiv(a: i32, b: i32, c: i32) i32;
 extern "kernel32" fn GetCurrentProcess() usize;
+extern "kernel32" fn GetCurrentThreadId() u32;
 extern "kernel32" fn SetProcessWorkingSetSize(hProcess: usize, min: isize, max: isize) i32;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) u16;
@@ -233,6 +284,13 @@ extern "user32" fn DispatchMessageW(*MSG) isize;
 extern "user32" fn PostQuitMessage(nExitCode: i32) void;
 extern "user32" fn ShowWindow(hwnd: usize, nCmdShow: i32) i32;
 extern "user32" fn SetForegroundWindow(hwnd: usize) i32;
+extern "user32" fn GetForegroundWindow() usize;
+extern "user32" fn GetWindowThreadProcessId(hwnd: usize, pid: ?*u32) u32;
+extern "user32" fn AttachThreadInput(idAttach: u32, idAttachTo: u32, attach: i32) i32;
+extern "user32" fn BringWindowToTop(hwnd: usize) i32;
+extern "user32" fn SetActiveWindow(hwnd: usize) usize;
+extern "user32" fn SetFocus(hwnd: usize) usize;
+extern "user32" fn IsIconic(hwnd: usize) i32;
 extern "user32" fn DestroyWindow(hwnd: usize) i32;
 extern "user32" fn PostMessageW(hwnd: usize, msg: u32, wp: usize, lp: isize) i32;
 extern "user32" fn SendMessageW(hwnd: usize, msg: u32, wp: usize, lp: isize) isize;
@@ -241,10 +299,9 @@ extern "user32" fn UnregisterHotKey(hwnd: usize, id: i32) i32;
 extern "user32" fn LoadCursorW(hInstance: usize, lpCursorName: usize) usize;
 extern "user32" fn LoadIconW(hInstance: usize, lpIconName: usize) usize;
 extern "user32" fn MessageBoxW(hwnd: usize, text: [*:0]const u16, caption: [*:0]const u16, utype: u32) i32;
-extern "user32" fn CreatePopupMenu() usize;
-extern "user32" fn AppendMenuW(hMenu: usize, flags: u32, idNewItem: usize, lpNewItem: ?[*:0]const u16) i32;
-extern "user32" fn TrackPopupMenu(hMenu: usize, flags: u32, x: i32, y: i32, reserved: i32, hwnd: usize, prcRect: ?*const RECT) i32;
-extern "user32" fn DestroyMenu(hMenu: usize) i32;
+extern "user32" fn MonitorFromPoint(pt: POINT, flags: u32) usize;
+extern "user32" fn GetMonitorInfoW(hMonitor: usize, lpmi: *MONITORINFO) i32;
+extern "user32" fn ScreenToClient(hwnd: usize, pt: *POINT) i32;
 extern "user32" fn GetCursorPos(*POINT) i32;
 extern "user32" fn AdjustWindowRectEx(*RECT, style: usize, menu: i32, exStyle: usize) i32;
 extern "user32" fn FindWindowW(lpClassName: [*:0]const u16, lpWindowName: ?[*:0]const u16) usize;
@@ -262,6 +319,7 @@ extern "user32" fn TrackMouseEvent(*TRACKMOUSEEVENT) i32;
 extern "user32" fn GetDpiForWindow(hwnd: usize) u32;
 extern "user32" fn SetProcessDPIAware() i32;
 extern "user32" fn SetWindowPos(hwnd: usize, after: usize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) i32;
+extern "user32" fn SetWindowRgn(hwnd: usize, hRgn: usize, bRedraw: i32) i32;
 extern "user32" fn IsWindowVisible(hwnd: usize) i32;
 extern "user32" fn SetTimer(hwnd: usize, id: usize, elapse: u32, proc: ?*const anyopaque) usize;
 extern "user32" fn GetKeyState(vk: i32) i16;
@@ -271,9 +329,12 @@ extern "shell32" fn Shell_NotifyIconW(dwMessage: u32, lpData: *NOTIFYICONDATAW) 
 extern "gdi32" fn CreateCompatibleDC(hdc: usize) usize;
 extern "gdi32" fn CreateCompatibleBitmap(hdc: usize, w: i32, h: i32) usize;
 extern "gdi32" fn SelectObject(hdc: usize, obj: usize) usize;
+extern "gdi32" fn GetPixel(hdc: usize, x: i32, y: i32) u32;
+extern "gdi32" fn SetPixel(hdc: usize, x: i32, y: i32, color: u32) u32;
 extern "gdi32" fn DeleteObject(obj: usize) i32;
 extern "gdi32" fn DeleteDC(hdc: usize) i32;
 extern "gdi32" fn CreateSolidBrush(color: u32) usize;
+extern "gdi32" fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, w: i32, h: i32) usize;
 extern "gdi32" fn CreatePen(style: u32, width: i32, color: u32) usize;
 extern "gdi32" fn RoundRect(hdc: usize, l: i32, t: i32, r: i32, b: i32, w: i32, h: i32) i32;
 extern "gdi32" fn Ellipse(hdc: usize, l: i32, t: i32, r: i32, b: i32) i32;
@@ -532,6 +593,303 @@ fn handleRecKey(hwnd: usize, vk: u32) void {
 }
 
 // ================= 托盘 =================
+// ================= 自绘托盘菜单 =================
+// 不用 TrackPopupMenu：菜单是程序自己的 WS_POPUP 工具窗口（不进任务栏、不进 Alt+Tab），
+// 画什么、放哪、点哪全自己控制。它激活时用户只会看到这个菜单本身，
+// 主窗口从不参与，所以不存在"右键把设置窗口顶到前台"的问题。
+fn menuHeight() i32 {
+    var h: i32 = 0;
+    for (MENU_DEFS) |d| h += if (d.sep) sc(MENU_SEP_H) else sc(MENU_ITEM_H);
+    return h + sc(MENU_PAD) * 2;
+}
+
+fn menuSlotRect(i: usize) RECT {
+    var y: i32 = sc(MENU_PAD);
+    var k: usize = 0;
+    while (k < i) : (k += 1) y += if (MENU_DEFS[k].sep) sc(MENU_SEP_H) else sc(MENU_ITEM_H);
+    const hh = if (MENU_DEFS[i].sep) sc(MENU_SEP_H) else sc(MENU_ITEM_H);
+    return RECT{ .left = 0, .top = y, .right = sc(MENU_W), .bottom = y + hh };
+}
+
+// 返回点中的菜单命令 ID，未命中返回 0
+fn menuHit(x: i32, y: i32) i32 {
+    var i: usize = 0;
+    while (i < MENU_DEFS.len) : (i += 1) {
+        if (MENU_DEFS[i].sep) continue;
+        if (inRect(menuSlotRect(i), x, y)) return MENU_DEFS[i].cmd;
+    }
+    return 0;
+}
+
+// 返回悬停项编号（1 起，对应 MENU_DEFS 下标 + 1），未命中返回 0
+fn menuHoverIndex(x: i32, y: i32) usize {
+    var i: usize = 0;
+    while (i < MENU_DEFS.len) : (i += 1) {
+        if (MENU_DEFS[i].sep) continue;
+        if (inRect(menuSlotRect(i), x, y)) return i + 1;
+    }
+    return 0;
+}
+
+// 键盘上下移动时跳过分隔条
+fn menuMoveHover(delta: i32) void {
+    var idx: i32 = @intCast(g_menu_hover);
+    const n: i32 = @intCast(MENU_DEFS.len);
+    var k: i32 = 0;
+    while (k < n) : (k += 1) {
+        idx += delta;
+        if (idx < 1) idx = n;
+        if (idx > n) idx = 1;
+        if (!MENU_DEFS[@intCast(idx - 1)].sep) {
+            g_menu_hover = @intCast(idx);
+            return;
+        }
+    }
+}
+
+fn freeMenuBuffers() void {
+    if (g_mm_mem != 0) { _ = DeleteDC(g_mm_mem); g_mm_mem = 0; }
+    if (g_mm_bm != 0) { _ = DeleteObject(g_mm_bm); g_mm_bm = 0; }
+    if (g_mm_mem4 != 0) { _ = DeleteDC(g_mm_mem4); g_mm_mem4 = 0; }
+    if (g_mm_bm4 != 0) { _ = DeleteObject(g_mm_bm4); g_mm_bm4 = 0; }
+    g_mm_w = 0;
+    g_mm_h = 0;
+}
+
+fn menuPaint(hwnd: usize) void {
+    var ps: PAINTSTRUCT = undefined;
+    const hdc = BeginPaint(hwnd, &ps);
+    defer _ = EndPaint(hwnd, &ps);
+
+    var rc: RECT = undefined;
+    _ = GetClientRect(hwnd, &rc);
+    const cw = rc.right;
+    const ch = rc.bottom;
+    if (cw <= 0 or ch <= 0) return;
+
+    if (g_mm_mem == 0 or g_mm_w != cw or g_mm_h != ch) {
+        freeMenuBuffers();
+        g_mm_mem = CreateCompatibleDC(hdc);
+        g_mm_bm = CreateCompatibleBitmap(hdc, cw, ch);
+        _ = SelectObject(g_mm_mem, g_mm_bm);
+        g_mm_mem4 = CreateCompatibleDC(hdc);
+        g_mm_bm4 = CreateCompatibleBitmap(hdc, cw * SS, ch * SS);
+        _ = SelectObject(g_mm_mem4, g_mm_bm4);
+        _ = SetStretchBltMode(g_mm_mem, HALFTONE);
+        g_mm_w = cw;
+        g_mm_h = ch;
+    }
+
+    // 4x 超采样画形状：白底 + 1px 圆角描边 + 悬停底色 + 分隔线
+    fillRectColor(g_mm_mem4, 0, 0, cw * SS, ch * SS, C_BG);
+    const radius = sc(10);
+    roundFill(g_mm_mem4, 0, 0, cw * SS, ch * SS, radius * SS, C_DIV);
+    roundFill(g_mm_mem4, SS, SS, cw * SS - SS, ch * SS - SS, (radius - 1) * SS, C_BG);
+
+    if (g_menu_hover > 0 and g_menu_hover <= MENU_DEFS.len) {
+        const r = menuSlotRect(g_menu_hover - 1);
+        roundFill(g_mm_mem4, sc(4) * SS, r.top * SS, (cw - sc(4)) * SS, r.bottom * SS, sc(6) * SS, C_MENU_HOV);
+    }
+    var i: usize = 0;
+    while (i < MENU_DEFS.len) : (i += 1) {
+        if (!MENU_DEFS[i].sep) continue;
+        const r = menuSlotRect(i);
+        const y = @divTrunc(r.top + r.bottom, 2) * SS;
+        fillRectColor(g_mm_mem4, sc(10) * SS, y, (cw - sc(10)) * SS, y + SS, C_DIV);
+    }
+
+    _ = StretchBlt(g_mm_mem, 0, 0, cw, ch, g_mm_mem4, 0, 0, cw * SS, ch * SS, SRCCOPY);
+
+    // 文字单独按原始尺寸绘制，保持 ClearType 锐利
+    i = 0;
+    while (i < MENU_DEFS.len) : (i += 1) {
+        if (MENU_DEFS[i].sep) continue;
+        const r = menuSlotRect(i);
+        drawTextW16(g_mm_mem, MENU_DEFS[i].text, sc(16), r.top, cw - sc(24), r.bottom - r.top, C_TEXT, g_menu_font, 0);
+    }
+
+    _ = BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, g_mm_mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+}
+
+fn hideTrayMenu() void {
+    if (g_menu_hwnd == 0) return;
+    if (IsWindowVisible(g_menu_hwnd) == 0) return;
+    _ = ShowWindow(g_menu_hwnd, SW_HIDE);
+    freeMenuBuffers(); // 菜单不常开，缓冲用完就还回去
+    // 前台还给原来的窗口（比如刚才正在用的浏览器）
+    if (g_menu_prev_fg != 0 and GetForegroundWindow() == g_menu_hwnd) {
+        _ = SetForegroundWindow(g_menu_prev_fg);
+    }
+}
+
+fn menuWndProc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
+    switch (msg) {
+        WM_CREATE => {
+            g_menu_font = makeFont(10, 400);
+            return 0;
+        },
+        WM_ERASEBKGND => return 1,
+        WM_PAINT => {
+            menuPaint(hwnd);
+            return 0;
+        },
+        WM_MOUSEMOVE => {
+            const x: i32 = @as(i16, @truncate(lp & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
+            const hv = menuHoverIndex(x, y);
+            if (hv != g_menu_hover) {
+                g_menu_hover = hv;
+                _ = InvalidateRect(hwnd, null, 0);
+            }
+            _ = SetCursor(if (hv != 0) g_cursor_hand else LoadCursorW(0, IDC_ARROW));
+            if (!g_menu_tracked) {
+                g_menu_tracked = true;
+                var tme = TRACKMOUSEEVENT{ .cbSize = @sizeOf(TRACKMOUSEEVENT), .dwFlags = TME_LEAVE, .hwndTrack = hwnd, .dwHoverTime = 0 };
+                _ = TrackMouseEvent(&tme);
+            }
+            return 0;
+        },
+        WM_MOUSELEAVE => {
+            g_menu_tracked = false;
+            if (g_menu_hover != 0) {
+                g_menu_hover = 0;
+                _ = InvalidateRect(hwnd, null, 0);
+            }
+            return 0;
+        },
+        WM_LBUTTONUP => {
+            const x: i32 = @as(i16, @truncate(lp & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
+            const cmd = menuHit(x, y);
+            hideTrayMenu();
+            if (cmd != 0) _ = PostMessageW(g_hwnd, WM_MENU_CMD, @intCast(cmd), 0);
+            return 0;
+        },
+        WM_KEYDOWN => {
+            switch (wp) {
+                0x1B => { // Esc
+                    hideTrayMenu();
+                    return 0;
+                },
+                0x26 => { // ↑
+                    menuMoveHover(-1);
+                    _ = InvalidateRect(hwnd, null, 0);
+                    return 0;
+                },
+                0x28 => { // ↓
+                    menuMoveHover(1);
+                    _ = InvalidateRect(hwnd, null, 0);
+                    return 0;
+                },
+                0x0D => { // Enter
+                    var i: usize = 0;
+                    while (i < MENU_DEFS.len) : (i += 1) {
+                        if (g_menu_hover == i + 1 and !MENU_DEFS[i].sep) {
+                            const cmd = MENU_DEFS[i].cmd;
+                            hideTrayMenu();
+                            _ = PostMessageW(g_hwnd, WM_MENU_CMD, @intCast(cmd), 0);
+                            return 0;
+                        }
+                    }
+                    return 0;
+                },
+                else => {},
+            }
+        },
+        WM_ACTIVATE => {
+            if ((wp & 0xFFFF) == 0) hideTrayMenu(); // WA_INACTIVE：点到菜单外面了
+            return 0;
+        },
+        WM_DESTROY => {
+            freeMenuBuffers();
+            if (g_menu_font != 0) { _ = DeleteObject(g_menu_font); g_menu_font = 0; }
+            g_menu_hwnd = 0;
+            return 0;
+        },
+        else => {},
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+fn ensureMenuWindow() usize {
+    if (g_menu_hwnd != 0) return g_menu_hwnd;
+    const hInst = GetModuleHandleW(null);
+    const wc = WNDCLASSEXW{
+        .cbSize = @sizeOf(WNDCLASSEXW),
+        .style = CS_DROPSHADOW, // 弹窗阴影
+        .lpfnWndProc = menuWndProc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = hInst,
+        .hIcon = 0,
+        .hCursor = LoadCursorW(0, IDC_ARROW),
+        .hbrBackground = 0,
+        .lpszMenuName = null,
+        .lpszClassName = MENU_CLASS,
+        .hIconSm = 0,
+    };
+    _ = RegisterClassExW(&wc);
+    g_menu_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, MENU_CLASS, MENU_CLASS, WS_POPUP, 0, 0, sc(MENU_W), menuHeight(), 0, 0, hInst, null);
+    return g_menu_hwnd;
+}
+
+// 在鼠标位置弹出菜单：默认向上展开（光标落在菜单右下角），越界时自动翻转/贴边
+fn showTrayMenu() void {
+    const m = ensureMenuWindow();
+    if (m == 0) return;
+
+    const w = sc(MENU_W);
+    const h = menuHeight();
+    var pt: POINT = undefined;
+    _ = GetCursorPos(&pt);
+
+    var work = RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    var mi = std.mem.zeroes(MONITORINFO);
+    mi.cbSize = @sizeOf(MONITORINFO);
+    const mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (mon != 0 and GetMonitorInfoW(mon, &mi) != 0) {
+        work = mi.rcWork;
+    } else {
+        work = RECT{ .left = 0, .top = 0, .right = pt.x + w, .bottom = pt.y };
+    }
+
+    var x = pt.x;
+    var y = pt.y - h;
+    if (y < work.top) y = pt.y; // 上方放不下 → 改向下展开
+    if (y + h > work.bottom) y = work.bottom - h;
+    if (x + w > work.right) x = work.right - w;
+    if (x < work.left) x = work.left;
+
+    g_menu_prev_fg = GetForegroundWindow();
+    g_menu_hover = 0;
+    g_menu_tracked = false;
+    _ = SetWindowPos(m, HWND_TOPMOST, x, y, w, h, 0x0040); // SWP_SHOWWINDOW
+    // 圆角窗口区域：让系统裁掉四角（否则深色桌面下会看到白色直角）
+    const rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, sc(10) * 2, sc(10) * 2);
+    if (rgn != 0) _ = SetWindowRgn(m, rgn, 1);
+    forceForeground(m);
+    _ = SetFocus(m);
+    _ = InvalidateRect(m, null, 1);
+}
+
+
+// 抢前台：本进程在后台时 SetForegroundWindow 会被 Windows 的前台锁直接拒绝（只闪任务栏），
+// 所以先把本线程输入队列临时附加到当前前台窗口线程，借它的权限置前，设完立即解除。
+fn forceForeground(hwnd: usize) void {
+    const fg = GetForegroundWindow();
+    const my_tid = GetCurrentThreadId();
+    if (fg != 0 and fg != hwnd) {
+        const fg_tid = GetWindowThreadProcessId(fg, null);
+        if (fg_tid != 0 and fg_tid != my_tid) {
+            _ = AttachThreadInput(my_tid, fg_tid, 1);
+            _ = SetForegroundWindow(hwnd);
+            _ = AttachThreadInput(my_tid, fg_tid, 0);
+            return;
+        }
+    }
+    _ = SetForegroundWindow(hwnd);
+}
+
 fn addTrayIcon(hwnd: usize) void {
     var nid = std.mem.zeroes(NOTIFYICONDATAW);
     nid.cbSize = @sizeOf(NOTIFYICONDATAW);
@@ -552,9 +910,17 @@ fn removeTrayIcon(hwnd: usize) void {
     _ = Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
+// 唤醒设置窗口并抢到前台。
 fn showSettings(hwnd: usize) void {
-    _ = ShowWindow(hwnd, SW_SHOW);
-    _ = SetForegroundWindow(hwnd);
+    if (IsIconic(hwnd) != 0) {
+        _ = ShowWindow(hwnd, SW_RESTORE); // 最小化时 SW_SHOW 不会还原
+    } else {
+        _ = ShowWindow(hwnd, SW_SHOW);
+    }
+    forceForeground(hwnd);
+    _ = BringWindowToTop(hwnd);
+    _ = SetActiveWindow(hwnd);
+    _ = SetFocus(hwnd);
 }
 
 // ================= 自绘 UI =================
@@ -724,11 +1090,23 @@ fn drawSwitch(hdc: usize, r: RECT, on_state: bool) void {
 }
 
 // 每行顶部 y：四行等高间距（快捷键按钮已移到标题行右侧，不再单独占一行）
+// 顶部要让出自绘标题栏的 CHROME_H
 fn rowTop(i: usize) i32 {
-    return sc(18) + @as(i32, @intCast(i)) * sc(64);
+    return sc(18 + CHROME_H) + @as(i32, @intCast(i)) * sc(64);
+}
+
+// 自绘标题栏的两个按钮（最小化 / 关闭），右对齐；不含最大化
+fn layoutChrome() void {
+    const by = sc(6);
+    const bh = sc(26);
+    const bw = sc(28);
+    const right = g_cw - sc(10);
+    rc_btn_close = RECT{ .left = right - bw, .top = by, .right = right, .bottom = by + bh };
+    rc_btn_min = RECT{ .left = rc_btn_close.left - sc(6) - bw, .top = by, .right = rc_btn_close.left - sc(6), .bottom = by + bh };
 }
 
 fn layout(hdc: usize) void {
+    layoutChrome();
     const sw_w = sc(46);
     const sw_h = sc(24);
     const x2 = g_cw - sc(20);
@@ -750,7 +1128,97 @@ fn layout(hdc: usize) void {
     const ptop = rowTop(0) - sc(3);
     g_pill = RECT{ .left = x2 - pw, .top = ptop, .right = x2, .bottom = ptop + sc(26) };
     g_xrect = RECT{ .left = g_pill.right - sc(24), .top = g_pill.top, .right = g_pill.right, .bottom = g_pill.bottom };
-    rc_off = RECT{ .left = sc(20), .top = sc(276), .right = g_cw - sc(20), .bottom = sc(316) };
+    rc_off = RECT{ .left = sc(20), .top = sc(276 + CHROME_H), .right = g_cw - sc(20), .bottom = sc(316 + CHROME_H) };
+}
+
+// 把某个像素按覆盖率混入图标颜色（1x 直绘，配合下面的子采样实现抗锯齿）
+fn blendGlyphPx(hdc: usize, px: i32, py: i32, cov: f32) void {
+    const ink_r: f32 = @floatFromInt(C_MUT & 0xFF);
+    const ink_g: f32 = @floatFromInt((C_MUT >> 8) & 0xFF);
+    const ink_b: f32 = @floatFromInt((C_MUT >> 16) & 0xFF);
+    const bg = GetPixel(hdc, px, py);
+    const br: f32 = @floatFromInt(bg & 0xFF);
+    const bgc: f32 = @floatFromInt((bg >> 8) & 0xFF);
+    const bb: f32 = @floatFromInt((bg >> 16) & 0xFF);
+    const r: u32 = @intFromFloat(@round(br + (ink_r - br) * cov));
+    const g: u32 = @intFromFloat(@round(bgc + (ink_g - bgc) * cov));
+    const b: u32 = @intFromFloat(@round(bb + (ink_b - bb) * cov));
+    _ = SetPixel(hdc, px, py, r | (g << 8) | (b << 16));
+}
+
+// 图标像素框（以按钮中心为圆心，边长按半臂长 + 1px 余量）
+const GlyphBox = struct { x0: i32, x1: i32, y0: i32, y1: i32, cx: f32, cy: f32 };
+
+fn glyphBox(r: RECT, half: f32) GlyphBox {
+    const cx: f32 = @as(f32, @floatFromInt(r.left + r.right)) / 2.0;
+    const cy: f32 = @as(f32, @floatFromInt(r.top + r.bottom)) / 2.0;
+    return .{
+        .x0 = @as(i32, @intFromFloat(@floor(cx - half))) - 1,
+        .x1 = @as(i32, @intFromFloat(@ceil(cx + half))) + 1,
+        .y0 = @as(i32, @intFromFloat(@floor(cy - half))) - 1,
+        .y1 = @as(i32, @intFromFloat(@ceil(cy + half))) + 1,
+        .cx = cx,
+        .cy = cy,
+    };
+}
+
+// 标题栏按钮里的图形：关闭 × / 最小化 —。
+// 两个都按 4x4 子采样自己算覆盖率，不用 GDI 画线或填充斜四边形 —— 它那套
+// "终点不含、右/下边界不算"的光栅化规则会让两条斜臂差一档覆盖度，10px 的
+// × 看上去就是歪的。子采样网格与形状都严格镜像对称，画出来上下左右完全一致。
+fn drawCaptionGlyphs(hdc: usize) void {
+    const half: f32 = @floatFromInt(sc(4)); // 半臂长
+    const hw: f32 = 0.75; // 笔画半宽（≈1.5 逻辑像素）
+
+    // 关闭 ×
+    {
+        const b = glyphBox(rc_btn_close, half);
+        var py = b.y0;
+        while (py <= b.y1) : (py += 1) {
+            var px = b.x0;
+            while (px <= b.x1) : (px += 1) {
+                var hits: u32 = 0;
+                var sy: u32 = 0;
+                while (sy < 4) : (sy += 1) {
+                    var sx: u32 = 0;
+                    while (sx < 4) : (sx += 1) {
+                        const fx = @as(f32, @floatFromInt(px)) + (@as(f32, @floatFromInt(sx)) + 0.5) * 0.25 - b.cx;
+                        const fy = @as(f32, @floatFromInt(py)) + (@as(f32, @floatFromInt(sy)) + 0.5) * 0.25 - b.cy;
+                        if (@abs(fx) <= half and @abs(fy) <= half) {
+                            const d1 = @abs(fy - fx) * 0.70710678;
+                            const d2 = @abs(fy + fx) * 0.70710678;
+                            if (@min(d1, d2) <= hw) hits += 1;
+                        }
+                    }
+                }
+                if (hits == 0) continue;
+                blendGlyphPx(hdc, px, py, @as(f32, @floatFromInt(hits)) / 16.0);
+            }
+        }
+    }
+
+    // 最小化 —
+    {
+        const b = glyphBox(rc_btn_min, half);
+        var py = b.y0;
+        while (py <= b.y1) : (py += 1) {
+            var px = b.x0;
+            while (px <= b.x1) : (px += 1) {
+                var hits: u32 = 0;
+                var sy: u32 = 0;
+                while (sy < 4) : (sy += 1) {
+                    var sx: u32 = 0;
+                    while (sx < 4) : (sx += 1) {
+                        const fx = @as(f32, @floatFromInt(px)) + (@as(f32, @floatFromInt(sx)) + 0.5) * 0.25 - b.cx;
+                        const fy = @as(f32, @floatFromInt(py)) + (@as(f32, @floatFromInt(sy)) + 0.5) * 0.25 - b.cy;
+                        if (@abs(fx) <= half and @abs(fy) <= hw) hits += 1;
+                    }
+                }
+                if (hits == 0) continue;
+                blendGlyphPx(hdc, px, py, @as(f32, @floatFromInt(hits)) / 16.0);
+            }
+        }
+    }
 }
 
 const RowDef = struct {
@@ -827,6 +1295,14 @@ fn paint(hwnd: usize) void {
 
         // 4x 超采样：形状画在 4 倍画布上，再缩小回去获得平滑边缘
         fillRectColor(g_mem4, 0, 0, g_cw * SS, g_ch * SS, C_BG);
+
+        // 标题栏按钮的悬停底色
+        if (g_hover == 9) {
+            roundFill(g_mem4, rc_btn_min.left * SS, rc_btn_min.top * SS, rc_btn_min.right * SS, rc_btn_min.bottom * SS, sc(6) * SS, C_BTN_HOV);
+        } else if (g_hover == 10) {
+            roundFill(g_mem4, rc_btn_close.left * SS, rc_btn_close.top * SS, rc_btn_close.right * SS, rc_btn_close.bottom * SS, sc(6) * SS, C_CLOSE_HOV);
+        }
+
         var i: usize = 0;
         while (i < 4) : (i += 1) {
             const row = rows[i];
@@ -857,6 +1333,10 @@ fn paint(hwnd: usize) void {
         _ = StretchBlt(g_mem, 0, 0, g_cw, g_ch, g_mem4, 0, 0, g_cw * SS, g_ch * SS, SRCCOPY);
 
         // 文字按原始尺寸绘制（ClearType 保持锐利，不参与缩放）
+        // ---- 自绘标题栏：标题 + 最小化 / 关闭 ----
+        drawTextW16(g_mem, WND_TITLE, sc(20), 0, g_cw - sc(96), sc(CHROME_H), C_TEXT, g_font_title, 0);
+        drawCaptionGlyphs(g_mem);
+
         var j: usize = 0;
         while (j < 4) : (j += 1) {
             const row = rows[j];
@@ -884,7 +1364,14 @@ fn paint(hwnd: usize) void {
     _ = BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, g_mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
 }
 
+// 悬停时有视觉变化的命中项：主按钮 7、标题栏按钮 9/10
+fn isVisualHit(h: u8) bool {
+    return h == 7 or h == 9 or h == 10;
+}
+
 fn hitTest(x: i32, y: i32) u8 {
+    if (inRect(rc_btn_close, x, y)) return 10; // 标题栏：关闭
+    if (inRect(rc_btn_min, x, y)) return 9; // 标题栏：最小化
     var i: usize = 1; // 快捷键行没有开关
     while (i < 4) : (i += 1) {
         if (inRect(rc_sw[i], x, y)) return @intCast(i + 1);
@@ -906,10 +1393,12 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             g_font_btn = makeFont(10, 500);
             g_cursor_hand = LoadCursorW(0, IDC_HAND);
 
-            // 窗口尺寸随 DPI 缩放（内容布局用 sc() 缩放，窗口必须同步放大，否则内容被截断）
-            var frc = RECT{ .left = 0, .top = 0, .right = sc(360), .bottom = sc(336) };
-            _ = AdjustWindowRectEx(&frc, WND_STYLE, 0, 0);
-            _ = SetWindowPos(hwnd, 0, 0, 0, frc.right - frc.left, frc.bottom - frc.top, SWP_NOMOVE | SWP_NOZORDER);
+            // 窗口尺寸随 DPI 缩放。客户区 = 整个窗口（自绘标题栏，WM_NCCALCSIZE 已去掉非客户区），
+            // 所以这里直接用内容尺寸，不再 AdjustWindowRectEx。
+            g_cw = sc(360);
+            g_ch = sc(336 + CHROME_H);
+            _ = SetWindowPos(hwnd, 0, 0, 0, g_cw, g_ch, SWP_NOMOVE | SWP_NOZORDER);
+            layoutChrome();
 
             g_auto_on = isAutoRun();
             g_tray_on = trayResident();
@@ -929,6 +1418,23 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             return 0;
         },
         WM_ERASEBKGND => return 1,
+        // 自绘标题栏：把非客户区整个去掉，客户区铺满窗口（系统标题栏随之消失，
+        // 最大化按钮也就根本不存在了），再由 WM_NCHITTEST 把标题栏区域交给拖动
+        WM_NCCALCSIZE => {
+            if (wp != 0) return 0;
+        },
+        WM_NCHITTEST => {
+            const sx: i32 = @as(i16, @truncate(lp & 0xFFFF));
+            const sy: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
+            var pt = POINT{ .x = sx, .y = sy };
+            _ = ScreenToClient(hwnd, &pt);
+            if (pt.y < sc(CHROME_H)) {
+                // 按钮区域要留给点击，其余部分当标题栏拖动
+                if (inRect(rc_btn_min, pt.x, pt.y) or inRect(rc_btn_close, pt.x, pt.y)) return HTCLIENT;
+                return HTCAPTION;
+            }
+            return HTCLIENT;
+        },
         WM_PAINT => {
             paint(hwnd);
             return 0;
@@ -938,10 +1444,12 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             const y: i32 = @as(i16, @truncate((lp >> 16) & 0xFFFF));
             const h = hitTest(x, y);
             if (h != g_hover) {
-                // 只有主按钮有悬停变色，开关悬停无视觉变化 → 只失效按钮区域
-                if ((h == 7) != (g_hover == 7)) {
+                // 主按钮 / 标题栏按钮有悬停变色。只要新旧任一项"有视觉变化"就要重画：
+                // 之前写成两者都比对，导致从最小化直接移到关闭（都是可视项）时不刷新，
+                // 关闭按钮的高亮因此一直画不出来。
+                if (isVisualHit(h) or isVisualHit(g_hover)) {
                     g_cache_valid = false;
-                    _ = InvalidateRect(hwnd, &rc_off, 0);
+                    _ = InvalidateRect(hwnd, null, 0);
                 }
                 g_hover = h;
             }
@@ -956,11 +1464,11 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
         WM_MOUSELEAVE => {
             g_tracked = false;
             if (g_hover != 0) {
-                const was_btn = g_hover == 7;
+                const was_visual = isVisualHit(g_hover);
                 g_hover = 0;
-                if (was_btn) {
+                if (was_visual) {
                     g_cache_valid = false;
-                    _ = InvalidateRect(hwnd, &rc_off, 0);
+                    _ = InvalidateRect(hwnd, null, 0);
                 }
             }
             trimWS();
@@ -1016,6 +1524,8 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
                     }
                     invalidateRow(hwnd, 0);
                 },
+                9 => _ = ShowWindow(hwnd, SW_MINIMIZE), // 标题栏：最小化
+                10 => _ = PostMessageW(hwnd, WM_CLOSE, 0, 0), // 标题栏：关闭
                 else => {},
             }
             return 0;
@@ -1047,30 +1557,23 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
         TRAY_CB_MSG => {
             const ev: u32 = @intCast(lp & 0xFFFF);
             if (ev == WM_RBUTTONUP) {
-                const menu = CreatePopupMenu();
-                _ = AppendMenuW(menu, MF_STRING, @intCast(MENU_OFF), utf16("关闭显示器"));
-                _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-                _ = AppendMenuW(menu, MF_STRING, @intCast(MENU_SETTINGS), utf16("设置…"));
-                _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-                _ = AppendMenuW(menu, MF_STRING, @intCast(MENU_QUIT), utf16("退出"));
-                var pt: POINT = undefined;
-                _ = GetCursorPos(&pt);
-                _ = SetForegroundWindow(hwnd); // 让菜单在点击外部时自动收起
-                const cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, null);
-                _ = DestroyMenu(menu);
-                _ = PostMessageW(hwnd, WM_NULL, 0, 0);
-                switch (cmd) {
-                    MENU_OFF => monitorOff(),
-                    MENU_SETTINGS => showSettings(hwnd),
-                    MENU_QUIT => _ = DestroyWindow(hwnd),
-                    else => {},
-                }
+                showTrayMenu(); // 自绘菜单，主窗口不参与
             } else if (ev == WM_LBUTTONUP) {
-                showSettings(hwnd);
+                _ = PostMessageW(hwnd, WM_SHOW_SETTINGS, 0, 0);
+            }
+            return 0;
+        },
+        WM_MENU_CMD => {
+            switch (@as(i32, @intCast(wp))) {
+                MENU_OFF => monitorOff(),
+                MENU_SETTINGS => _ = PostMessageW(hwnd, WM_SHOW_SETTINGS, 0, 0),
+                MENU_QUIT => _ = DestroyWindow(hwnd),
+                else => {},
             }
             return 0;
         },
         WM_DESTROY => {
+            if (g_menu_hwnd != 0) _ = DestroyWindow(g_menu_hwnd);
             var nid = std.mem.zeroes(NOTIFYICONDATAW);
             nid.cbSize = @sizeOf(NOTIFYICONDATAW);
             nid.hWnd = hwnd;
@@ -1123,10 +1626,9 @@ pub fn main() u8 {
     };
     _ = RegisterClassExW(&wc);
 
-    var rc = RECT{ .left = 0, .top = 0, .right = 360, .bottom = 336 };
-    _ = AdjustWindowRectEx(&rc, WND_STYLE, 0, 0);
-    const w = rc.right - rc.left;
-    const h = rc.bottom - rc.top;
+    // 客户区 = 整个窗口（自绘标题栏），初始尺寸就是内容尺寸
+    const w = 360;
+    const h = 336 + CHROME_H;
 
     g_hwnd = CreateWindowExW(0, CLASS_NAME, WND_TITLE, WND_STYLE, 300, 300, w, h, 0, 0, hInst, null);
 
