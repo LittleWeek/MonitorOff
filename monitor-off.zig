@@ -84,6 +84,7 @@ const WH_MOUSE_LL: i32 = 14; // 低级鼠标钩子（同上）
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOZORDER: u32 = 0x0004;
+const SWP_FRAMECHANGED: u32 = 0x0020;
 
 const DT_CENTER: u32 = 0x0001;
 const DT_VCENTER: u32 = 0x0004;
@@ -1531,7 +1532,10 @@ fn wndproc(hwnd: usize, msg: u32, wp: usize, lp: isize) callconv(.c) isize {
             // 所以这里直接用内容尺寸，不再 AdjustWindowRectEx。
             g_cw = sc(360);
             g_ch = sc(336 + CHROME_H);
-            _ = SetWindowPos(hwnd, 0, 0, 0, g_cw, g_ch, SWP_NOMOVE | SWP_NOZORDER);
+            // 必须带 SWP_FRAMECHANGED：100% 缩放时 sc(360) 恰好等于创建时的 360，尺寸没变化，
+            // 系统就不会重算非客户区，WS_CAPTION 的边框会留着（多一条系统标题栏、内容被裁掉）。
+            // 125%/150% 下尺寸变了才会顺带重算，所以这个问题只在 100% 下暴露。
+            _ = SetWindowPos(hwnd, 0, 0, 0, g_cw, g_ch, SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED);
             layoutChrome();
 
             g_auto_on = isAutoRun();
