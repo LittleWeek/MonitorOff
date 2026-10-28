@@ -17,11 +17,11 @@ Windows 上的显示器关闭小工具：一个快捷键把屏幕关掉，托盘
 
 实测环境：Windows 11、`-O ReleaseSmall` 构建，内存数据取自 `GetProcessMemoryInfo` 与 `Win32_PerfFormattedData_PerfProc_Process`，各状态采样 5 次取范围。
 
-| 指标 | 实测值 |
-| --- | --- |
-| exe 体积 | 0.081 MB |
-| 任务管理器内存占用 | 0.6–3.6 MB |
-| 空闲 CPU | 0.000%（20 秒累计 0 ms） |
+| 指标               | 实测值                   |
+| ------------------ | ------------------------ |
+| exe 体积           | 0.081 MB                 |
+| 任务管理器内存占用 | 0.6–3.6 MB               |
+| 空闲 CPU           | 0.000%（20 秒累计 0 ms） |
 
 托盘常驻时只等快捷键和托盘消息，不轮询；菜单用的位图缓冲在收起时释放，反复开合不会累积。
 
@@ -34,7 +34,7 @@ Windows 上的显示器关闭小工具：一个快捷键把屏幕关掉，托盘
 
 ## 构建
 
-需要 [Zig](https://ziglang.org/) 0.17.0，只依赖系统 DLL（user32/gdi32/shell32/advapi32/dwmapi）。
+需要 [Zig](https://ziglang.org/) 0.17.0，只依赖系统 DLL：
 
 `icon/icon.res` 是构建产物（`*.res` 不入库），所以要先把它从 `icon.rc` 编出来，再链接：
 
@@ -55,7 +55,6 @@ zig build-exe monitor-off.zig icon/icon.res -O ReleaseSmall --subsystem windows 
 ```
 monitor-off/
 ├── monitor-off.zig      源码（单文件，零依赖）
-├── monitor-off.exe      构建产物
 ├── icon/                图标：生成脚本、ico、rc、预览图（res 由构建生成）
 ├── docs/settings.png    设置窗口截图（README 用）
 ├── tools/shot.py        界面自检截图（开发用）
