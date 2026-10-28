@@ -36,7 +36,9 @@ Windows 上的显示器关闭小工具：一个快捷键把屏幕关掉，托盘
 
 需要 [Zig](https://ziglang.org/) 0.17.0，只依赖系统 DLL：
 
-`icon/icon.res` 是构建产物（`*.res` 不入库），所以要先把它从 `icon.rc` 编出来，再链接：
+最省事是双击 `build.bat`：依次结束正在运行的实例、生成 `icon.res`、编译、再启动新版本（`build.bat norun` 只构建不启动）。脚本优先用 `D:\Sdk\zig-0.17.0\zig.exe`，没有就用 PATH 里的 `zig`，也可以先 `set ZIG=...\zig.exe` 指定。
+
+手动构建时，`icon/icon.res` 是构建产物（`*.res` 不入库），要先把它从 `icon.rc` 编出来，再链接：
 
 ```bash
 # 1) 生成图标资源
@@ -48,13 +50,14 @@ zig build-exe monitor-off.zig icon/icon.res -O ReleaseSmall --subsystem windows 
 
 `zig rc` 是 Zig 自带的资源编译器，不需要额外装 windres 之类的工具。产物是 `monitor-off.exe`，约 0.081 MB。
 
-改图标的话：`python icon/gen_icon.py` 会按原 SVG 的几何比例重绘显示器图标（脚本里 4x 超采样抗锯齿），生成多尺寸 `icon.ico` 和 `icon_preview.png`；再重跑上面两步即可（第 1 步会把新的 `icon.ico` 重新打包进 `icon.res`）。
+改图标的话：`python icon/gen_icon.py` 会按原 SVG 的几何比例重绘显示器图标（脚本里 4x 超采样抗锯齿），生成多尺寸 `icon.ico` 和 `icon_preview.png`；再重跑 `build.bat`（或上面两步）即可（第 1 步会把新的 `icon.ico` 重新打包进 `icon.res`）。
 
 ## 目录结构
 
 ```
 monitor-off/
 ├── monitor-off.zig      源码（单文件，零依赖）
+├── build.bat            构建脚本：结束进程 → 生成 res → 编译 → 启动
 ├── icon/                图标：生成脚本、ico、rc、预览图（res 由构建生成）
 ├── docs/settings.png    设置窗口截图（README 用）
 ├── tools/shot.py        界面自检截图（开发用）
