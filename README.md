@@ -34,15 +34,21 @@ Windows 上的显示器关闭小工具：一个快捷键把屏幕关掉，托盘
 
 ## 构建
 
-需要 [Zig](https://ziglang.org/) 0.17.0，只依赖系统 DLL（user32/gdi32/shell32/advapi32/dwmapi）：
+需要 [Zig](https://ziglang.org/) 0.17.0，只依赖系统 DLL（user32/gdi32/shell32/advapi32/dwmapi）。
+
+`icon/icon.res` 是构建产物（`*.res` 不入库），所以要先把它从 `icon.rc` 编出来，再链接：
 
 ```bash
+# 1) 生成图标资源
+zig rc icon/icon.rc icon/icon.res
+
+# 2) 编译（把刚生成的 icon.res 一起链进去）
 zig build-exe monitor-off.zig icon/icon.res -O ReleaseSmall --subsystem windows -lgdi32 -lshell32 -ladvapi32 -ldwmapi
 ```
 
-产物是 `monitor-off.exe`（`icon/icon.res` 是预先编好的图标资源，链接时一起塞进 exe）。
+`zig rc` 是 Zig 自带的资源编译器，不需要额外装 windres 之类的工具。产物是 `monitor-off.exe`，约 0.081 MB。
 
-改图标的话：`python icon/gen_icon.py` 会按原 SVG 的几何比例重绘显示器图标（脚本里 4x 超采样抗锯齿），生成多尺寸 `icon.ico` 和 `icon_preview.png`；再用资源编译器把 `icon.rc` 编成 `icon.res`，重新链接即可。
+改图标的话：`python icon/gen_icon.py` 会按原 SVG 的几何比例重绘显示器图标（脚本里 4x 超采样抗锯齿），生成多尺寸 `icon.ico` 和 `icon_preview.png`；再重跑上面两步即可（第 1 步会把新的 `icon.ico` 重新打包进 `icon.res`）。
 
 ## 目录结构
 
@@ -50,7 +56,7 @@ zig build-exe monitor-off.zig icon/icon.res -O ReleaseSmall --subsystem windows 
 monitor-off/
 ├── monitor-off.zig      源码（单文件，零依赖）
 ├── monitor-off.exe      构建产物
-├── icon/                图标：生成脚本、ico、rc、res、预览图
+├── icon/                图标：生成脚本、ico、rc、预览图（res 由构建生成）
 ├── docs/settings.png    设置窗口截图（README 用）
 ├── tools/shot.py        界面自检截图（开发用）
 ├── README.md
