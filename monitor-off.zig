@@ -20,7 +20,12 @@ const WM_NULL: u32 = 0x0000;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
-const WM_MOUSELEAVE: u32 = 0x02A2;
+// 注意：客户区鼠标离开是 0x02A3，非客户区的 WM_NCMOUSELEAVE 才是 0x02A2，两者只差一位。
+// 这里曾误写成 0x02A2，后果极隐蔽：TrackMouseEvent(TME_LEAVE) 发的是 0x02A3，wndproc 等的是
+// 0x02A2，消息永远落进 else 交给 DefWindowProc，等于程序从未处理过"鼠标离开窗口"。
+// 表现是鼠标移出后悬停高亮一直不退（在窗口内移到空白处却正常，因为那条走 WM_MOUSEMOVE），
+// 且仅在移出窗口时复现、"偶尔"才会被发现。改这里之前先确认不是这个坑。
+const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_NCCALCSIZE: u32 = 0x0083;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_SETCURSOR: u32 = 0x0020;
@@ -1071,6 +1076,17 @@ fn removeTrayIcon(hwnd: usize) void {
 
 // 唤醒设置窗口并抢到前台。
 fn showSettings(hwnd: usize) void {
+    // 窗口隐藏/最小化期间收不到 WM_MOUSELEAVE，g_hover 会停在隐藏前的悬停项上
+    // （最常见的是点关闭收进托盘，g_hover 留在 10 = 关闭按钮）。下次显示时不清掉，
+    // 重绘就会把关闭按钮的悬停底色画出来，看起来像鼠标一直停在上面。
+    // g_tracked 同理：残留的 true 会让 WM_MOUSEMOVE 不再重新挂 TrackMouseEvent，
+    // 之后鼠标移出窗口也收不到 WM_MOUSELEAVE，高亮就再也擦不掉了。
+    const shown = IsWindowVisible(hwnd) != 0 and IsIconic(hwnd) == 0;
+    if (!shown) {
+        g_hover = 0;
+        g_tracked = false;
+        g_cache_valid = false;
+    }
     if (IsIconic(hwnd) != 0) {
         _ = ShowWindow(hwnd, SW_RESTORE); // 最小化时 SW_SHOW 不会还原
     } else {
